@@ -136,7 +136,7 @@ namespace Nop.WebTail.Stripe.Extensions
 
             var chargeRequest = new stripe.ChargeCreateOptions()
             {
-                Amount = (int)processPaymentRequest.OrderTotal * 100,
+                Amount = (int)(processPaymentRequest.OrderTotal * 100),
                 Capture = transactionMode == TransactionMode.Charge,
                 Source = token.Id,
                 StatementDescriptor = $"{store.Name.ToStripeDescriptor()}",
@@ -235,7 +235,7 @@ namespace Nop.WebTail.Stripe.Extensions
             var refundService = new stripe.RefundService(stripePaymentSettings.GetStripeClient());
             stripe.Refund refund = refundService.Create(new stripe.RefundCreateOptions()
             {
-                Amount = (int)refundPaymentRequest.AmountToRefund * 100,
+                Amount = (int)(refundPaymentRequest.AmountToRefund * 100),
                 Charge = refundPaymentRequest.Order.CaptureTransactionId
             });
 
