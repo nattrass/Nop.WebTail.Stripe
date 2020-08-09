@@ -8,10 +8,8 @@ using Nop.Services.Customers;
 using Nop.Services.Directory;
 using Nop.Services.Payments;
 using Stripe;
-using Stripe.Issuing;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using stripe = Stripe;
 
@@ -100,25 +98,16 @@ namespace Nop.WebTail.Stripe.Extensions
             }
         }
         
-        public static stripe.TokenCreateOptions CreateTokenOptions(this ProcessPaymentRequest processPaymentRequest,
-            ICustomerService customerService,
-            IStateProvinceService stateProvinceService,
-            ICountryService countryService,
-            StripeCurrency stripeCurrency)
+        public static stripe.TokenCreateOptions CreateTokenOptions(this ProcessPaymentRequest processPaymentRequest, Core.Domain.Customers.Customer customer, StripeCurrency stripeCurrency)
         {
             return new stripe.TokenCreateOptions()
             {
-                Card = processPaymentRequest.CreateCreditCardOptions(customerService, stateProvinceService, countryService, stripeCurrency)
+                Card = processPaymentRequest.CreateCreditCardOptions(customer, stripeCurrency)
             };
         }
-
-        public static stripe.CreditCardOptions CreateCreditCardOptions(this ProcessPaymentRequest processPaymentRequest,
-            ICustomerService customerService,
-            IStateProvinceService stateProvinceService,
-            ICountryService countryService,
-            StripeCurrency stripeCurrency)
+        
+        public static stripe.CreditCardOptions CreateCreditCardOptions(this ProcessPaymentRequest processPaymentRequest, Core.Domain.Customers.Customer customer, StripeCurrency stripeCurrency)
         {
-            
             var creditCardOptions = new stripe.CreditCardOptions()
             {
                 Cvc = processPaymentRequest.CreditCardCvv2,
@@ -129,24 +118,14 @@ namespace Nop.WebTail.Stripe.Extensions
                 Number = processPaymentRequest.CreditCardNumber,
             };
 
-            var customer = customerService.GetCustomerById(processPaymentRequest.CustomerId);
-            var customerBillingAddress = customerService.GetCustomerBillingAddress(customer);
-            var billingStateProvince = customerBillingAddress.StateProvinceId.HasValue ?
-                                                    stateProvinceService.GetStateProvinceById(customerBillingAddress.StateProvinceId.Value) :
-                                                    null;
-
-            var billingCountry = customerBillingAddress != null && customerBillingAddress.CountryId.HasValue ?
-                            countryService.GetCountryById(customerBillingAddress.CountryId.Value) :
-                            null;
-
-            if (customer != null && customerBillingAddress != null)
+            if (customer.BillingAddress != null)
             {
-                creditCardOptions.AddressCity = customerBillingAddress.City;
-                creditCardOptions.AddressCountry = billingCountry?.Name;
-                creditCardOptions.AddressLine1 = customerBillingAddress.Address1;
-                creditCardOptions.AddressLine2 = customerBillingAddress.Address2;
-                creditCardOptions.AddressState = billingStateProvince?.Name;
-                creditCardOptions.AddressZip = customerBillingAddress.ZipPostalCode;
+                creditCardOptions.AddressCity = customer.BillingAddress.City;
+                creditCardOptions.AddressCountry = customer.BillingAddress.Country?.Name;
+                creditCardOptions.AddressLine1 = customer.BillingAddress.Address1;
+                creditCardOptions.AddressLine2 = customer.BillingAddress.Address2;
+                creditCardOptions.AddressState = customer.BillingAddress.StateProvince?.Name;
+                creditCardOptions.AddressZip = customer.BillingAddress.ZipPostalCode;
             }
 
             return creditCardOptions;
@@ -157,7 +136,7 @@ namespace Nop.WebTail.Stripe.Extensions
 
             var chargeRequest = new stripe.ChargeCreateOptions()
             {
-                Amount = (int)(processPaymentRequest.OrderTotal * 100m),
+                Amount = (int)(processPaymentRequest.OrderTotal * 100),
                 Capture = transactionMode == TransactionMode.Charge,
                 Source = token.Id,
                 StatementDescriptor = $"{store.Name.ToStripeDescriptor()}",
@@ -201,42 +180,47 @@ namespace Nop.WebTail.Stripe.Extensions
                 return customerService.Create(customer.CreateCustomerOptions(paymentSettings));
         }
 
-        public static stripe.Charge CreateCharge(this ProcessPaymentRequest processPaymentRequest, 
-            StripePaymentSettings stripePaymentSettings,
-            CurrencySettings currencySettings, 
-            Store store, 
-            ICustomerService customerService,
-            IStateProvinceService stateProvinceService,
-            ICountryService countryService,
-            ICurrencyService currencyService, 
-            IGenericAttributeService genericAttributeService)
+        public static stripe.Charge CreateCharge(this ProcessPaymentRequest processPaymentRequest, StripePaymentSettings stripePaymentSettings, CurrencySettings currencySettings, Store store, 
+                                                      ICustomerService customerService, ICurrencyService currencyService, IGenericAttributeService genericAttributeService)
         {
+            int substep = 0;
 
-            var customer = customerService.GetCustomerById(processPaymentRequest.CustomerId);
-            if (customer == null)
-                throw new NopException("Customer cannot be loaded");
+            try
+            {
+                var customer = customerService.GetCustomerById(processPaymentRequest.CustomerId);
+                if (customer == null)
+                    throw new NopException("Customer cannot be loaded");
+                substep = 1;
+                var currency = currencyService.GetCurrencyById(currencySettings.PrimaryStoreCurrencyId);
+                if (currency == null)
+                    throw new NopException("Primary store currency cannot be loaded");
+                substep = 2;
+                if (!Enum.TryParse(currency.CurrencyCode, out StripeCurrency stripeCurrency))
+                    throw new NopException($"The {currency.CurrencyCode} currency is not supported by Stripe");
+                substep = 3;
 
-            var currency = currencyService.GetCurrencyById(currencySettings.PrimaryStoreCurrencyId);
-            if (currency == null)
-                throw new NopException("Primary store currency cannot be loaded");
+                var stripeCustomerService = new stripe.CustomerService(stripePaymentSettings.GetStripeClient());
+                var chargeService = new stripe.ChargeService(stripePaymentSettings.GetStripeClient());
+                var tokenService = new stripe.TokenService(stripePaymentSettings.GetStripeClient());
+                substep = 4;
+                var stripeCustomer = stripeCustomerService.GetOrCreateCustomer(customer, genericAttributeService, stripePaymentSettings);
+                substep = 5;
+                var tokenOptions = processPaymentRequest.CreateTokenOptions(customer, stripeCurrency);
+                substep = 6;
+                var token = tokenService.Create(tokenOptions);
+                substep = 7;
+                var chargeOptions = processPaymentRequest.CreateChargeOptions(store, token, stripePaymentSettings.TransactionMode, stripeCurrency);
+                substep = 8;
 
-            if (!Enum.TryParse(currency.CurrencyCode, out StripeCurrency stripeCurrency))
-                throw new NopException($"The {currency.CurrencyCode} currency is not supported by Stripe");
-             
-
-            var stripeCustomerService = new stripe.CustomerService(stripePaymentSettings.GetStripeClient());
-            var chargeService = new stripe.ChargeService(stripePaymentSettings.GetStripeClient());
-            var tokenService = new stripe.TokenService(stripePaymentSettings.GetStripeClient());
-                
-            var stripeCustomer = stripeCustomerService.GetOrCreateCustomer(customer, genericAttributeService, stripePaymentSettings);
-
-            var tokenOptions = processPaymentRequest.CreateTokenOptions(customerService, stateProvinceService, countryService, stripeCurrency);
-            var token = tokenService.Create(tokenOptions);
-            var chargeOptions = processPaymentRequest.CreateChargeOptions(store, token, stripePaymentSettings.TransactionMode, stripeCurrency);
-              
-            var charge = chargeService.Create(chargeOptions);
-            return charge;
-           
+                var charge = chargeService.Create(chargeOptions);
+                substep = 9;
+                return charge;
+            } 
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed at substep {substep}", ex);
+            }
+            
         }
 
         public static stripe.Refund CreateRefund(this RefundPaymentRequest refundPaymentRequest, StripePaymentSettings stripePaymentSettings, CurrencySettings currencySettings, ICurrencyService currencyService)
@@ -249,10 +233,9 @@ namespace Nop.WebTail.Stripe.Extensions
                 throw new NopException($"The {currency.CurrencyCode} currency is not supported by Stripe");
 
             var refundService = new stripe.RefundService(stripePaymentSettings.GetStripeClient());
-
             stripe.Refund refund = refundService.Create(new stripe.RefundCreateOptions()
             {
-                Amount = (int)(refundPaymentRequest.AmountToRefund * 100m),
+                Amount = (int)(refundPaymentRequest.AmountToRefund * 100),
                 Charge = refundPaymentRequest.Order.CaptureTransactionId
             });
 
